@@ -5,11 +5,14 @@ A demo interface showing how the glaucoma detection would work
 """
 
 import streamlit as st
-import cv2
 import numpy as np
 from PIL import Image
-import tensorflow as tf
 import os
+import time
+import random
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
 
 # Configure Streamlit page
 st.set_page_config(
@@ -299,54 +302,142 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Load models (same as original functionality)
+# Define model architectures
+class SimpleCNN(nn.Module):
+    """Simple CNN for glaucoma detection - adjust architecture as needed"""
+    def __init__(self, num_classes=2):
+        super(SimpleCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((7, 7)),
+            nn.Flatten(),
+            nn.Linear(256 * 7 * 7, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+    
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+# Load PyTorch models
 @st.cache_resource
 def load_models():
     models = {}
     model_paths = {
-        "MobileNetV3": "models/mobilenet_model.h5",
-        "ResNet50": "models/resnet_model.h5", 
-        "EfficientNet": "models/efficientnet_model.h5"
+        "MobileNetV3": "models/mobilenet_model.pth",
+        "ResNet50": "models/resnet_model.pth", 
+        "EfficientNet": "models/efficientnet_model.pth"
     }
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     for name, path in model_paths.items():
         if os.path.exists(path):
             try:
-                models[name] = tf.keras.models.load_model(path)
+                # Create model instance - you may need to adjust this based on your actual model architecture
+                model = SimpleCNN(num_classes=2)  # Adjust based on your model
+                
+                # Load the state dict
+                state_dict = torch.load(path, map_location=device)
+                model.load_state_dict(state_dict)
+                model.eval()
+                model.to(device)
+                
+                models[name] = model
+                st.success(f"✅ {name} loaded successfully")
             except Exception as e:
                 st.error(f"Error loading {name}: {str(e)}")
+                # Fallback to demo mode for this model
+                models[name] = f"demo_{name.lower()}"
         else:
-            st.warning(f"Model file not found: {path}")
+            st.warning(f"Model file not found: {path} - Using demo mode")
+            # Use demo mode when model file doesn't exist
+            models[name] = f"demo_{name.lower()}"
     
     return models
 
 def preprocess_image(image, target_size=(224, 224)):
-    """Preprocess image for model prediction"""
+    """Preprocess image for PyTorch model prediction"""
+    # Define transforms
+    transform = transforms.Compose([
+        transforms.Resize(target_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    image = image.resize(target_size)
-    image_array = np.array(image)
-    image_array = image_array / 255.0
-    image_array = np.expand_dims(image_array, axis=0)
+    # Apply transforms and add batch dimension
+    image_tensor = transform(image).unsqueeze(0)
     
-    return image_array
+    return image_tensor
 
 def predict_glaucoma(model, image):
-    """Make prediction using the selected model"""
+    """Make prediction using PyTorch model or demo mode"""
     try:
-        preprocessed_image = preprocess_image(image)
-        prediction = model.predict(preprocessed_image)
-        
-        # Assuming binary classification (0: Normal, 1: Glaucoma)
-        confidence = float(prediction[0][0])
-        
-        if confidence > 0.5:
-            result = "Glaucoma Detected"
-            risk_level = "High" if confidence > 0.8 else "Moderate"
+        # Check if this is a real model or demo mode
+        if isinstance(model, str) and model.startswith("demo_"):
+            # Demo mode - simulate processing time and return mock results
+            time.sleep(2)
+            
+            model_name = model.replace("demo_", "").replace("_", "")
+            model_behaviors = {
+                "mobilenetv3": {"base_confidence": 0.7, "variance": 0.2},
+                "resnet50": {"base_confidence": 0.8, "variance": 0.15},
+                "efficientnet": {"base_confidence": 0.75, "variance": 0.18}
+            }
+            
+            behavior = model_behaviors.get(model_name, {"base_confidence": 0.7, "variance": 0.2})
+            
+            # Generate random but realistic confidence score
+            confidence = max(0.1, min(0.95, 
+                random.gauss(behavior["base_confidence"], behavior["variance"])))
+            
+            # Randomly determine if it's glaucoma (weighted towards normal for demo)
+            is_glaucoma = random.random() < 0.3  # 30% chance of glaucoma detection
+            
+            if is_glaucoma:
+                confidence = max(0.6, confidence)  # Ensure reasonable confidence for positive cases
+                result = "Glaucoma Detected"
+                risk_level = "High" if confidence > 0.8 else "Moderate"
+            else:
+                confidence = min(0.5, confidence)  # Ensure confidence < 0.5 for negative cases
+                result = "Normal"
+                risk_level = "Low"
         else:
-            result = "Normal"
-            risk_level = "Low"
+            # Real PyTorch model prediction
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Preprocess image
+            image_tensor = preprocess_image(image)
+            image_tensor = image_tensor.to(device)
+            
+            # Make prediction
+            with torch.no_grad():
+                outputs = model(image_tensor)
+                probabilities = torch.softmax(outputs, dim=1)
+                confidence = float(probabilities[0][1])  # Probability of glaucoma class
+                
+                if confidence > 0.5:
+                    result = "Glaucoma Detected"
+                    risk_level = "High" if confidence > 0.8 else "Moderate"
+                else:
+                    result = "Normal"
+                    risk_level = "Low"
         
         probabilities = {
             "normal": 1 - confidence,
